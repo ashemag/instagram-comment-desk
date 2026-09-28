@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Instagram Comment Desk",
+  "version": "1.0.0",
+  "description": "A big, searchable comment inbox for your Instagram posts and reels. Find, filter, and reply to comments fast.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Comment Desk (Option+Shift+C)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["https://www.instagram.com/*", "https://instagram.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*", "https://instagram.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*.png"],
+      "matches": ["https://www.instagram.com/*", "https://instagram.com/*"]
+    }
+  ],
+  "commands": {
+    "toggle-panel": {
+      "suggested_key": { "default": "Alt+Shift+C" },
+      "description": "Open or close Comment Desk"
+    }
+  }
+}

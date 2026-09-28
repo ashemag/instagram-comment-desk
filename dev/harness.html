@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Comment Desk harness</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, sans-serif; background: #fafafa; }
+    .fake-post { width: 820px; margin: 24px 0 0 60px; height: 520px; background: #ddd; border-radius: 8px; display: grid; place-items: center; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="fake-post">Fake Instagram post</div>
+  <script>
+    document.cookie = 'ds_user_id=1001; path=/';
+    document.cookie = 'csrftoken=test; path=/';
+
+    const store = {};
+    window.chrome = {
+      runtime: { id: 'harness', getURL: (p) => '/' + p, onMessage: { addListener(fn) { window.__sendMessage = fn; } } },
+      storage: { local: {
+        get: async (keys) => Object.fromEntries([].concat(keys).map((k) => [k, store[k]])),
+        set: async (obj) => Object.assign(store, obj),
+      } },
+    };
+
+    const me = { pk: 1001, username: 'ashebytes', profile_pic_url: '' };
+    const people = ['sample_sam', 'demo.dana', 'test_taylor', 'fake_frankie', 'example.eli', 'mock_morgan', 'placeholder_pat', 'dummy_dev', 'harness_hana', 'stub_sky'];
+    const texts = ['Repo', 'Link 🙏', 'Link ✨', 'This is so cool, what tool is this?', 'How did you make the animations?', 'Can you share the prompt?', 'obsessed with this', 'Repo please!!', 'Is this open source?', 'The captions are so good'];
+    const now = Date.now() / 1000;
+    const comments = Array.from({ length: 34 }, (_, i) => ({
+      pk: String(18000000000000000000n + BigInt(i)),
+      text: texts[i % texts.length],
+      created_at: now - i * 5400,
+      comment_like_count: (i * 7) % 13,
+      child_comment_count: i % 4 === 1 ? 1 : 0,
+      preview_child_comments: i % 4 === 1 ? [{ pk: String(19000000000000000000n + BigInt(i)), text: '@' + people[i % people.length] + ' sent! 💌', created_at: now - i * 5000, user: me }] : [],
+      user: { pk: 2000 + i, username: people[i % people.length] + (i >= 10 ? i : ''), full_name: '', profile_pic_url: '' },
+    }));
+
+    window.fetch = async (url, opts = {}) => {
+      const u = new URL(url);
+      let body;
+      if (u.pathname.includes('/info/')) body = { items: [{ id: '3992700911398507105_1001', user: me, comment_count: 159, caption: { text: 'Built a whimsical animated site with AI ✨ comment "link" for the repo' } }] };
+      else if (u.pathname.endsWith('/comments/')) {
+        const page = Number(u.searchParams.get('min_id') || 0);
+        const slice = comments.slice(page * 15, page * 15 + 15);
+        body = { comments: slice, next_min_id: page * 15 + 15 < comments.length ? String(page + 1) : null };
+      } else if (u.pathname.includes('/add/')) {
+        const p = new URLSearchParams(opts.body);
+        body = { id: String(19900000000000000000n + BigInt(Math.floor(Math.random() * 1e6))), text: p.get('comment_text'), created_time: Date.now() / 1000, from: { id: 1001, username: 'ashebytes' }, status: 'ok' };
+      } else body = { status: 'ok' };
+      await new Promise((r) => setTimeout(r, 120));
+      return new Response(JSON.stringify(body), { status: 200 });
+    };
+  </script>
+  <script src="/content.js"></script>
+</body>
+</html>
