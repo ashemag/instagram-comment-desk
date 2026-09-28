@@ -136,7 +136,13 @@
       err.status = res.status;
       throw err;
     }
-    if (!json) throw new Error('Unexpected response from Instagram.');
+    if (!json) {
+      console.warn('[Comment Desk] Non-JSON response', method, path, res.status, res.headers.get('content-type'), text.slice(0, 300));
+      const err = new Error('Unexpected response from Instagram.');
+      err.status = res.status;
+      err.nonJson = true;
+      throw err;
+    }
     return json;
   }
 
@@ -185,8 +191,24 @@
     return api(`/api/v1/web/comments/${mediaId}/add/`, { method: 'POST', body });
   }
 
-  function setCommentLike(commentId, like) {
-    return api(`/api/v1/web/comments/${like ? 'like' : 'unlike'}/${commentId}/`, { method: 'POST' });
+  // Instagram has moved this endpoint more than once; likes are idempotent, so try each in turn.
+  async function setCommentLike(commentId, like) {
+    const verb = like ? 'like' : 'unlike';
+    const paths = [
+      `/api/v1/web/comments/${verb}/${commentId}/`,
+      `/web/comments/${verb}/${commentId}/`,
+      `/api/v1/media/${commentId}/comment_${verb}/`,
+    ];
+    let lastErr;
+    for (const path of paths) {
+      try {
+        return await api(path, { method: 'POST' });
+      } catch (e) {
+        lastErr = e;
+        if (e.status === 429) break;
+      }
+    }
+    throw new Error(`Instagram didn’t accept the ${verb}. ${lastErr?.nonJson ? '' : lastErr?.message || ''}`.trim());
   }
 
   function normUser(u = {}) {

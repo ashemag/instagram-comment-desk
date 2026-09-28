@@ -55,6 +55,10 @@
       const u = new URL(url);
       let body;
       let status = 200;
+      window.__likeCalls = window.__likeCalls || [];
+      if (/comments\/(un)?like|comment_(un)?like/.test(u.pathname)) window.__likeCalls.push(u.pathname);
+      // Mirrors the live site: the first like endpoint answers with an HTML page.
+      if (u.pathname.startsWith('/api/v1/web/comments/like/')) return new Response('<!DOCTYPE html><html></html>', { status: 200, headers: { 'content-type': 'text/html' } });
       const child = u.pathname.match(/comments\/(\d+)\/child_comments/);
       if (child) {
         const kids = childFor(child[1]);
