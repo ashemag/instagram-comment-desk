@@ -6,7 +6,8 @@
   const APP_ID = '936619743392459';
   const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   const PAGE_DELAY_MS = 350;
-  const THREAD_DELAY_MS = 300;
+  const THREAD_DELAY_MS = 250;
+  const THREAD_CONCURRENCY = 3;
   const RENDER_STEP = 200;
   const EMOJIS = ['❤️', '🙏', '😂', '🔥', '🥹', '🙌', '✨', '💌'];
   const DEFAULT_SETTINGS = {
@@ -39,6 +40,7 @@
       comments: new Map(),
       children: new Map(),
       childLoading: new Set(),
+      childFailed: new Set(),
       expanded: new Set(),
       done: new Set(),
       replied: new Set(),
@@ -129,6 +131,7 @@
       } else if (!msg) {
         msg = `Instagram returned an error (${res.status}).`;
       }
+      console.warn('[Comment Desk]', method, path, res.status, text.slice(0, 1000));
       const err = new Error(msg);
       err.status = res.status;
       throw err;
@@ -189,7 +192,7 @@
   function normUser(u = {}) {
     return {
       pk: uid(u),
-      username: u.username || 'unknown',
+      username: u.username || '',
       fullName: u.full_name || '',
       pic: u.profile_pic_url || u.profile_picture || '',
       verified: !!u.is_verified,
@@ -227,14 +230,40 @@
     return !!state.viewerId && c.user.pk === state.viewerId;
   }
 
+  let mentionCache = { state: null, version: -1, map: null };
+  let dataVersion = 0;
+  const touch = () => dataVersion++;
+
+  // Latest time you @mentioned each username anywhere on the post, lowercased.
+  function myMentionTimes() {
+    if (mentionCache.state === state && mentionCache.version === dataVersion) return mentionCache.map;
+    const map = new Map();
+    const add = (c) => {
+      if (!isMine(c)) return;
+      for (const m of c.text.matchAll(/@([A-Za-z0-9._]+)/g)) {
+        const name = m[1].replace(/\.+$/, '').toLowerCase();
+        map.set(name, Math.max(map.get(name) || 0, c.createdAt));
+      }
+    };
+    for (const c of state.comments.values()) {
+      add(c);
+      childrenOf(c).forEach(add);
+    }
+    mentionCache = { state, version: dataVersion, map };
+    return map;
+  }
+
   function repliedByMe(c) {
-    return state.replied.has(c.pk) || childrenOf(c).some(isMine);
+    if (state.replied.has(c.pk) || childrenOf(c).some(isMine)) return true;
+    const t = myMentionTimes().get(c.user.username.toLowerCase());
+    return t !== undefined && t >= c.createdAt;
   }
 
   function statusOf(c) {
     if (isMine(c)) return 'mine';
     if (repliedByMe(c)) return 'replied';
     if (state.done.has(c.pk)) return 'done';
+    if (c.childCount > 0 && !threadFullyKnown(c) && !state.childFailed.has(c.pk)) return 'checking';
     return 'needs';
   }
 
@@ -325,6 +354,7 @@
           if (!s.comments.has(c.pk)) added++;
           s.comments.set(c.pk, c);
         }
+        touch();
         scheduleRender();
         if (!next || seen.has(next.value) || (page > 0 && added === 0)) break;
         seen.add(next.value);
@@ -343,25 +373,41 @@
 
   // Threads whose preview doesn't include every reply might contain one of yours.
   async function scanThreads(token) {
-    const todo = [...state.comments.values()].filter(
-      (c) => c.childCount > 0 && !threadFullyKnown(c) && statusOf(c) === 'needs'
-    );
-    for (let i = 0; i < todo.length; i++) {
-      if (token !== loadToken) return;
-      state.scanning = { done: i, total: todo.length };
-      scheduleRender();
-      try {
-        await loadChildren(todo[i].pk);
-      } catch (e) {
-        if (e.status === 429) {
-          state.error = e.message;
-          break;
+    const s = state;
+    const todo = [...s.comments.values()]
+      .filter((c) => statusOf(c) === 'checking')
+      .sort((a, b) => b.createdAt - a.createdAt);
+    let next = 0;
+    let finished = 0;
+    let stop = false;
+    s.scanning = { done: 0, total: todo.length };
+    scheduleRender();
+
+    const worker = async () => {
+      while (!stop && next < todo.length) {
+        const c = todo[next++];
+        if (token !== loadToken) return;
+        try {
+          await loadChildren(c.pk);
+        } catch (e) {
+          console.warn('[Comment Desk] Could not load replies for comment', c.pk, e);
+          s.childFailed.add(c.pk);
+          if (e.status === 429) {
+            s.error = e.message;
+            stop = true;
+          }
         }
+        finished++;
+        s.scanning = { done: finished, total: todo.length };
+        scheduleRender();
+        await sleep(THREAD_DELAY_MS);
       }
-      await sleep(THREAD_DELAY_MS);
-    }
+    };
+    await Promise.all(Array.from({ length: THREAD_CONCURRENCY }, worker));
+
     if (token !== loadToken) return;
-    state.scanning = null;
+    if (stop) todo.forEach((c) => threadFullyKnown(c) || s.childFailed.add(c.pk));
+    s.scanning = null;
     render();
   }
 
@@ -374,7 +420,9 @@
       const kids = await fetchChildren(s.mediaId, pk);
       const c = s.comments.get(pk);
       s.children.set(pk, kids);
+      s.childFailed.delete(pk);
       if (c) c.childCount = Math.max(c.childCount, kids.length);
+      touch();
     } finally {
       s.childLoading.delete(pk);
       scheduleRender();
@@ -444,8 +492,10 @@
     state.comments = new Map();
     state.children = new Map();
     state.childLoading = new Set();
+    state.childFailed = new Set();
     state.scanning = null;
     state.limit = RENDER_STEP;
+    touch();
     loadAll();
   }
 
@@ -512,7 +562,17 @@
     render();
 
     try {
-      const res = await postComment(s.mediaId, text, r.parentId);
+      let res;
+      let droppedMention = false;
+      try {
+        res = await postComment(s.mediaId, text, r.parentId);
+      } catch (e) {
+        // Instagram rejects @mentions of people who limit who can mention them; the reply still threads under their comment.
+        const bare = r.username ? text.replace(new RegExp(`^@${escapeRegExp(r.username)}(?=\\s|$)\\s*`, 'i'), '').trim() : text;
+        if (!/mention/i.test(e.message) || !bare || bare === text) throw e;
+        res = await postComment(s.mediaId, bare, r.parentId);
+        droppedMention = true;
+      }
       if (s !== state) return;
       const reply = normComment(
         {
@@ -529,13 +589,14 @@
         s.children.set(r.parentId, [...childrenOf(top), reply]);
         top.childCount += 1;
       }
+      touch();
       s.replied.add(r.parentId);
       persist('replied');
       s.expanded.add(r.parentId);
       s.sending = false;
       s.replyingTo = null;
       s.draft = '';
-      toast('Reply posted');
+      toast(droppedMention ? `Reply posted without the @mention (Instagram wouldn’t allow mentioning @${r.username})` : 'Reply posted');
 
       if (s.filter === 'needs') {
         const idx = order.indexOf(r.parentId);
@@ -554,6 +615,10 @@
       render();
       focusComposer(false);
     }
+  }
+
+  function escapeRegExp(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   async function toggleLike(cid, parentId) {
@@ -650,10 +715,19 @@
     if (state.owner && c.user.pk === state.owner.pk) tags.push(`<span class="tag creator">${isMine(c) ? 'You' : 'Creator'}</span>`);
     if (st === 'replied') tags.push('<span class="tag ok">✓ Replied</span>');
     else if (st === 'done') tags.push('<span class="tag muted">Done</span>');
-    else if (st === 'needs' && state.isOwn) tags.push('<span class="tag needs">Needs reply</span>');
+    else if (st === 'checking' && state.isOwn) tags.push('<span class="tag muted">Checking replies…</span>');
+    else if (st === 'needs' && state.isOwn) {
+      tags.push('<span class="tag needs">Needs reply</span>');
+      if (state.childFailed.has(c.pk)) {
+        tags.push('<span class="tag muted" title="Instagram didn’t return this thread’s replies. Open the thread to retry.">Replies not checked</span>');
+      }
+    }
     const full = new Date(c.createdAt * 1000).toLocaleString();
+    const name = c.user.username
+      ? `<a class="user" href="/${esc(c.user.username)}/" target="_blank" rel="noopener">${hl(c.user.username, q)}</a>`
+      : '<span class="user">Instagram user</span>';
     return `<div class="meta">
-      <a class="user" href="/${esc(c.user.username)}/" target="_blank" rel="noopener">${hl(c.user.username, q)}</a>
+      ${name}
       ${c.user.verified ? '<span class="verified" title="Verified">✔︎</span>' : ''}
       <span class="time" title="${esc(full)}">${relTime(c.createdAt)}</span>
       ${tags.join('')}
@@ -694,7 +768,7 @@
       .join('');
     const emoji = EMOJIS.map((e) => `<button class="emoji" data-act="quick" data-text="${e}">${e}</button>`).join('');
     return `<div class="composer">
-      <div class="replying">Replying to <b>@${esc(r.username)}</b><button class="act" data-act="cancel">Cancel</button></div>
+      <div class="replying">Replying to <b>${r.username ? `@${esc(r.username)}` : 'this comment'}</b><button class="act" data-act="cancel">Cancel</button></div>
       <textarea rows="3" placeholder="Write a reply…" ${state.sending ? 'disabled' : ''}>${esc(state.draft)}</textarea>
       <div class="quick">${emoji}${quick}</div>
       <div class="send-row">
@@ -756,7 +830,7 @@
     const n = state.comments.size;
     if (state.loading) return `<span class="spin"></span>Loading comments… ${n} so far`;
     if (state.scanning) {
-      return `<span class="spin"></span>Checking reply threads for your replies… ${state.scanning.done}/${state.scanning.total}`;
+      return `<span class="spin"></span>Checking threads for your replies… ${state.scanning.done}/${state.scanning.total} (unchecked ones stay out of Needs reply)`;
     }
     if (!state.loadStarted) return '';
     const replies = [...state.comments.values()].reduce((sum, c) => sum + c.childCount, 0);

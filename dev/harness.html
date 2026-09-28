@@ -32,25 +32,46 @@
       text: texts[i % texts.length],
       created_at: now - i * 5400,
       comment_like_count: (i * 7) % 13,
-      child_comment_count: i % 4 === 1 ? 1 : 0,
+      child_comment_count: i % 4 === 1 ? 1 : i % 4 === 3 ? 2 : 0,
       preview_child_comments: i % 4 === 1 ? [{ pk: String(19000000000000000000n + BigInt(i)), text: '@' + people[i % people.length] + ' sent! 💌', created_at: now - i * 5000, user: me }] : [],
       user: { pk: 2000 + i, username: people[i % people.length] + (i >= 10 ? i : ''), full_name: '', profile_pic_url: '' },
     }));
+    // A top-level comment of yours that @mentions test_taylor instead of replying in-thread.
+    comments.push({ pk: '18000000000000000999', text: '@test_taylor here you go!', created_at: now - 60, comment_like_count: 0, child_comment_count: 0, preview_child_comments: [], user: me });
+
+    // Threads with 2 replies arrive without previews; the child endpoint returns someone else's reply plus yours.
+    // Comment 7's thread fails to load. Mentioning @example.eli is rejected, like Instagram does for restricted mentions.
+    const childFor = (pk) => {
+      const i = Number(BigInt(pk) - 18000000000000000000n);
+      if (i === 7) return null;
+      const author = comments[i].user.username;
+      return [
+        { pk: String(19100000000000000000n + BigInt(i)), text: 'same question!', created_at: now - i * 5300, user: { pk: 3000 + i, username: 'lurker_' + i } },
+        { pk: String(19200000000000000000n + BigInt(i)), text: '@' + author + ' check your DMs', created_at: now - i * 5200, user: me },
+      ];
+    };
 
     window.fetch = async (url, opts = {}) => {
       const u = new URL(url);
       let body;
-      if (u.pathname.includes('/info/')) body = { items: [{ id: '3992700911398507105_1001', user: me, comment_count: 159, caption: { text: 'Built a whimsical animated site with AI ✨ comment "link" for the repo' } }] };
+      let status = 200;
+      const child = u.pathname.match(/comments\/(\d+)\/child_comments/);
+      if (child) {
+        const kids = childFor(child[1]);
+        if (kids) body = { child_comments: kids };
+        else [status, body] = [500, { status: 'fail', message: 'Server error' }];
+      } else if (u.pathname.includes('/info/')) body = { items: [{ id: '3992700911398507105_1001', user: me, comment_count: 159, caption: { text: 'Built a whimsical animated site with AI ✨ comment "link" for the repo' } }] };
       else if (u.pathname.endsWith('/comments/')) {
         const page = Number(u.searchParams.get('min_id') || 0);
         const slice = comments.slice(page * 15, page * 15 + 15);
         body = { comments: slice, next_min_id: page * 15 + 15 < comments.length ? String(page + 1) : null };
       } else if (u.pathname.includes('/add/')) {
         const p = new URLSearchParams(opts.body);
-        body = { id: String(19900000000000000000n + BigInt(Math.floor(Math.random() * 1e6))), text: p.get('comment_text'), created_time: Date.now() / 1000, from: { id: 1001, username: 'ashebytes' }, status: 'ok' };
+        if (p.get('comment_text').startsWith('@example.eli')) [status, body] = [400, { status: 'fail', message: 'Failed to mention' }];
+        else body = { id: String(19900000000000000000n + BigInt(Math.floor(Math.random() * 1e6))), text: p.get('comment_text'), created_time: Date.now() / 1000, from: { id: 1001, username: 'ashebytes' }, status: 'ok' };
       } else body = { status: 'ok' };
       await new Promise((r) => setTimeout(r, 120));
-      return new Response(JSON.stringify(body), { status: 200 });
+      return new Response(JSON.stringify(body), { status });
     };
   </script>
   <script src="/content.js"></script>
